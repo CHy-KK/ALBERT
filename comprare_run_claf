@@ -20,7 +20,7 @@ from __future__ import print_function
 
 import os
 import time
-import classifier_utils
+import classifier_stride_utils
 import modeling
 import tokenization
 import tensorflow as tf
@@ -28,6 +28,7 @@ from tensorflow.contrib import cluster_resolver as contrib_cluster_resolver
 from tensorflow.contrib import tpu as contrib_tpu
 
 flags = tf.flags
+
 FLAGS = flags.FLAGS
 
 ## Required parameters
@@ -51,10 +52,10 @@ flags.DEFINE_string("spm_model_file", './albert_base/30k-clean.model',
 										"The model file for sentence piece tokenization.")
 
 flags.DEFINE_string(
-		"output_dir", './output_32',
+		"output_dir", './output_lower/',
 		"The output directory where the model checkpoints will be written.")
 
-flags.DEFINE_string("cached_dir", './cache_32',
+flags.DEFINE_string("cached_dir", './cache',
 										"Path to cached training and dev tfrecord file. "
 										"The file will be generated if not exist.")
 flags.DEFINE_string("ckpt_step", 'best',
@@ -73,7 +74,7 @@ flags.DEFINE_string(
 		"If set, the ALBERT hub module to use.")
 
 flags.DEFINE_bool(
-		"do_lower_case", False,
+		"do_lower_case", True,
 		"Whether to lower case the input text. Should be True for uncased "
 		"models and False for cased models.")
 
@@ -83,6 +84,8 @@ flags.DEFINE_integer(
 		"Sequences longer than this will be truncated, and sequences shorter "
 		"than this will be padded.")
 
+flags.DEFINE_integer("tokens_stride", 32, "Offset of two subsequence when seperating input sequence")
+
 flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
@@ -91,25 +94,25 @@ flags.DEFINE_bool(
 		"do_predict", False,
 		"Whether to run the model in inference mode on the test set.")
 
-flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 16, "Total batch size for training.")
 
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
 
 flags.DEFINE_integer("predict_batch_size", 8, "Total batch size for predict.")
 
-flags.DEFINE_float("learning_rate", 3e-5, "The initial learning rate for Adam.")
+flags.DEFINE_float("learning_rate", 5e-5, "The initial learning rate for Adam.")
 
-flags.DEFINE_integer("train_step", 1000000,
+flags.DEFINE_integer("train_step", 100000,
 										 "Total number of training steps to perform.")
 
 flags.DEFINE_integer(
-		"warmup_step", 1000,
+		"warmup_step", 10000,
 		"number of steps to perform linear learning rate warmup for.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
+flags.DEFINE_integer("save_checkpoints_steps", 2000,
 										 "How often to save the model checkpoint.")
 
-flags.DEFINE_integer("keep_checkpoint_max", 1000,
+flags.DEFINE_integer("keep_checkpoint_max", 100,
 										 "How many checkpoints to keep.")
 
 flags.DEFINE_integer("iterations_per_loop", 1000,
@@ -148,7 +151,9 @@ def get_input_example(guid, text_a):
 	examples.append(classifier_utils.InputExample(guid=guid, text_a=text_a[0],
 							   text_b=text_a[1], label='0'))
 	return examples
+	'''
 
+'''
 class FastPredict:
 
 	def __init__(self, estimator, checkpoint_path):
@@ -161,21 +166,19 @@ class FastPredict:
 
 	def input_fn_builder(self, seq_length=FLAGS.max_seq_length, is_training=False,
 								drop_remainder=False):
-		"""Creates an `input_fn` closure to be passed to TPUEstimator."""
 
 		vocab_file = FLAGS.vocab_file
 		label_list = ["0","1"]
 		tokenizer = tokenization.FullTokenizer(
 			vocab_file=vocab_file, do_lower_case=True,spm_model_file=FLAGS.spm_model_file)
 
-		def input_fn():
-			"""The actual input function."""
+		def input_fn():	
 			all_input_ids = []
 			all_input_mask = []
 			all_segment_ids = []
 			all_label_ids = []
 			all_is_real_example = []
-
+			
 			for feature in features:
 				all_input_ids.append(feature.input_ids)
 				all_input_mask.append(feature.input_mask)
@@ -210,13 +213,7 @@ class FastPredict:
 						   'segment_ids':(None,FLAGS.max_seq_length),
 						   'label_ids':(None),
 						   'is_real_example':(None)}))
-
 	def predict(self, feature_batch):
-		""" Runs a prediction on a set of features. Calling multiple times
-			does *not* regenerate the graph which makes predict much faster.
-			feature_batch a list of list of features. IMPORTANT: If you're only classifying 1 thing,
-			you still need to make it a batch of 1 by wrapping it in a list (i.e. predict([text_a,text_b])
-		"""
 		self.next_features = feature_batch
 		if self.first_run:
 			self.batch_size = len(feature_batch)
@@ -232,12 +229,35 @@ class FastPredict:
 		results.append(next(self.predictions))
 		return results
 
-	def close(self):
+	def clos(self):
 		self.closed=True
 		next(self.predictions)
+		
 '''
+def count_example_score(score_list):
+	return sum(score_list) / len(score_list)
+
+def final_score(reuslt, batch_index):
+	predictions = []
+	for _, pred in enumerate(result):
+		preictions.append(pred)
+	example_score = []
+	final_score_list = []
+	example_index = -1
+	for i, prediction in enumerate(predictions):
+		if example_index != batch_index[i]:
+			if example_index != -1:
+				score = count_final_score(example_score)
+				final_score_list.append(score)
+			example_index = batch_index[i]
+		else:
+			example_score.append(prediction)
+	return final_score_list
+					
+
+
 def main(_):
-	tf.logging.set_verbosity(tf.logging.INFO)
+	tf.logging.set_verbosity(tf.logging.ERROR)
 
 	processors = {
 			"cola": classifier_utils.ColaProcessor,
@@ -357,7 +377,7 @@ def main(_):
 					train_examples, label_list, FLAGS.max_seq_length, tokenizer,
 					train_file, task_name)
 		tf.logging.info("***** Running training *****")
-		tf.logging.info("  Num examples = %d", len(train_examples))
+		#tf.logging.info("  Num examples = %d", len(train_examples))
 		tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
 		tf.logging.info("  Num steps = %d", FLAGS.train_step)
 		train_input_fn = classifier_utils.file_based_input_fn_builder(
@@ -386,7 +406,7 @@ def main(_):
 		if not cached_dir:
 			cached_dir = FLAGS.output_dir
 		eval_file = os.path.join(cached_dir, task_name + "_eval.tf_record")
-		if not tf.gfile.Exists(eval_file):
+		`if not tf.gfile.Exists(eval_file):
 			classifier_utils.file_based_convert_examples_to_features(
 					eval_examples, label_list, FLAGS.max_seq_length, tokenizer,
 					eval_file, task_name)
@@ -529,7 +549,7 @@ def main(_):
 		
 		predict_examples = processor.get_test_examples(FLAGS.data_dir + '/test' + FLAGS.test_part + '.csv')
 		num_actual_predict_examples = len(predict_examples)
-		print(num_actual_predict_examples)
+		#print(num_actual_predict_examples)
 		if FLAGS.use_tpu:
 			# TPU requires a fixed batch size for all batches, therefore the number
 			# of examples must be a multiple of the batch size, or else examples
@@ -540,16 +560,18 @@ def main(_):
 		
 		predict_file = os.path.join(FLAGS.cached_dir, FLAGS.test_part + "_predict.tf_record")
 		if not tf.gfile.Exists(predict_file):
-			classifier_utils.file_based_convert_examples_to_features(
+			batch_index = classifier_utils.file_based_convert_examples_to_features(
 					predict_examples, label_list,
 					FLAGS.max_seq_length, tokenizer,
 					predict_file, task_name)
+		
 		tf.logging.info("***** Running prediction*****")
+		'''
 		tf.logging.info("  Num examples = %d (%d actual, %d padding)",
 										len(predict_examples), num_actual_predict_examples,
 										len(predict_examples) - num_actual_predict_examples)
 		tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
-		
+		'''
 		predict_drop_remainder = True if FLAGS.use_tpu else False
 		predict_input_fn = classifier_utils.file_based_input_fn_builder(
 				input_file=predict_file,
@@ -565,12 +587,13 @@ def main(_):
 		result = estimator.predict(
 				input_fn=predict_input_fn,
 				checkpoint_path=checkpoint_path)
-		
+		score_list = final_score(result, batch_index)
+
 		output_predict_file = os.path.join(FLAGS.output_dir, "test_results_"+FLAGS.ckpt_step+'_'+FLAGS.test_part+".tsv")
-		# output_submit_file = os.path.join(FLAGS.output_dir, "submit_results_"+FLAGS.ckpt_step+'_'+FLAGS.test_part+".tsv")
+		#output_submit_file = os.path.join(FLAGS.output_dir, "submit_results_"+FLAGS.ckpt_step+'_'+FLAGS.test_part+".tsv")
 		with tf.gfile.GFile(output_predict_file, "w") as pred_writer:
-				# tf.gfile.GFile(output_submit_file, "w") as sub_writer:
-			# sub_writer.write("index" + "\t" + "prediction\n")
+				#tf.gfile.GFile(output_submit_file, "w") as sub_writer:
+			#sub_writer.write("index" + "\t" + "prediction\n")
 			num_written_lines = 0
 			tf.logging.info("***** Predict results *****")
 			for (i, (example, prediction)) in\
@@ -582,12 +605,13 @@ def main(_):
 						str(class_probability)
 						for class_probability in probabilities) + "\n"
 				pred_writer.write(output_line)
-
+				'''
 				if task_name != "sts-b":
 					actual_label = label_list[int(prediction["predictions"])]
 				else:
 					actual_label = str(prediction["predictions"])
-				# sub_writer.write(example.guid + "\t" + actual_label + "\n")
+				sub_writer.write(example.guid + "\t" + actual_label + "\n")
+				'''
 				num_written_lines += 1
 		assert num_written_lines == num_actual_predict_examples
 		'''
